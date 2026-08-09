@@ -28,6 +28,13 @@ export default {
       return statusPage(url);
     }
 
+    // 자가진단. 휴대폰 브라우저만으로 "프록시 경로가 실제로 뚫려 있는가"를
+    // 판정하기 위한 것입니다. 인증 정보 없이 자기 자신의 /v1/messages 를 호출해
+    // 브라우저 → Worker → Anthropic → 되돌아오기 까지 전 구간을 한 번에 지나갑니다.
+    if (url.pathname === "/__eb/selftest") {
+      return selfTest(url);
+    }
+
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
@@ -145,6 +152,158 @@ function jsonError(status, type, message) {
   );
 }
 
+/**
+ * 인증 정보 없이 자기 자신의 /v1/messages 를 호출합니다.
+ *
+ * 열쇠를 안 넣었으니 Anthropic 은 반드시 401 authentication_error 를 돌려줍니다.
+ * 바로 그 401 이 "우리가 원하는 정답"입니다 — 그 응답이 돌아왔다는 것은
+ * 요청이 Worker 를 지나 진짜 Anthropic 서버까지 갔다가 온전히 돌아왔다는 뜻이니까요.
+ *
+ * 사용자의 로그인 정보는 하나도 필요하지 않고, 어디에도 남지 않습니다.
+ */
+async function selfTest(url) {
+  const startedAt = Date.now();
+  const checks = [];
+  let verdict = "fail";
+
+  try {
+    const probe = await fetch(`${url.origin}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-5",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "ping" }],
+      }),
+    });
+
+    const elapsed = Date.now() - startedAt;
+    const raw = await probe.text();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      /* JSON 이 아니면 아래에서 실패로 잡힙니다 */
+    }
+
+    const marker = probe.headers.get("x-extra-booster");
+    const errorType = parsed?.error?.type ?? null;
+
+    checks.push({
+      ok: marker === MARKER,
+      label: "요청이 이 프록시를 통과했는가",
+      detail: marker ? `표식 확인됨 (${marker})` : "표식 없음 — 프록시를 안 거쳤습니다",
+    });
+
+    checks.push({
+      ok: probe.status === 401,
+      label: "Anthropic 서버까지 도달했는가",
+      detail: `응답 코드 ${probe.status}${probe.status === 401 ? " (열쇠를 안 넣었으니 정상)" : ""}`,
+    });
+
+    checks.push({
+      ok: errorType === "authentication_error",
+      label: "Anthropic 이 보낸 응답이 온전히 돌아왔는가",
+      detail: errorType
+        ? `error.type = ${errorType}`
+        : "Anthropic 형식의 응답이 아닙니다",
+    });
+
+    checks.push({
+      ok: elapsed < 10000,
+      label: "왕복 속도",
+      detail: `${elapsed}ms`,
+    });
+
+    verdict = checks.every((c) => c.ok) ? "pass" : "fail";
+
+    log({ path: "/__eb/selftest", verdict, status: probe.status, ms: elapsed });
+  } catch (err) {
+    checks.push({
+      ok: false,
+      label: "Anthropic 서버 연결",
+      detail: String(err && err.message ? err.message : err),
+    });
+    log({ path: "/__eb/selftest", verdict: "fail", error: String(err) });
+  }
+
+  return selfTestPage(url, verdict, checks);
+}
+
+function selfTestPage(url, verdict, checks) {
+  const passed = verdict === "pass";
+  const rows = checks
+    .map(
+      (c) => `<li class="${c.ok ? "y" : "n"}">
+        <span class="mk">${c.ok ? "✅" : "❌"}</span>
+        <span><strong>${escapeHtml(c.label)}</strong><br>
+        <span class="d">${escapeHtml(c.detail)}</span></span></li>`,
+    )
+    .join("");
+
+  const html = `<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Extra-Booster 자가진단</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; padding:2rem 1.25rem 4rem; font: 16px/1.7 -apple-system, BlinkMacSystemFont,
+         "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif; }
+  main { max-width: 32rem; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 .35rem; }
+  .sub { opacity:.7; font-size:.9rem; margin:0 0 1.5rem; }
+  ul { list-style:none; padding:0; margin:0 0 1.75rem; }
+  li { display:flex; gap:.7rem; align-items:flex-start; padding:.8rem 0;
+       border-bottom:1px solid rgba(128,128,128,.22); }
+  .mk { flex:none; }
+  .d { opacity:.65; font-size:.87rem; }
+  .box { border-radius:10px; padding:1.1rem 1.15rem; margin-bottom:1.5rem; }
+  .pass { background:rgba(75,127,22,.13); border:1px solid rgba(75,127,22,.4); }
+  .fail { background:rgba(168,84,28,.13); border:1px solid rgba(168,84,28,.4); }
+  .box h2 { font-size:1.05rem; margin:0 0 .4rem; }
+  .box p { margin:0; font-size:.93rem; }
+  code { background:rgba(128,128,128,.16); padding:.15em .4em; border-radius:4px;
+         font-size:.85em; word-break:break-all; }
+  a.btn { display:inline-block; padding:.7rem 1.1rem; border-radius:8px;
+          border:1px solid rgba(128,128,128,.4); text-decoration:none; color:inherit;
+          font-size:.92rem; }
+</style></head><body><main>
+<h1>${passed ? "✅ 자가진단 통과" : "❌ 자가진단 실패"}</h1>
+<p class="sub">브라우저 → 이 프록시 → Anthropic → 되돌아오기 전 구간 점검</p>
+
+<ul>${rows}</ul>
+
+<div class="box ${passed ? "pass" : "fail"}">
+${
+  passed
+    ? `<h2>프록시는 정상입니다</h2>
+       <p>요청이 이 프록시를 지나 Anthropic 서버까지 갔다가 온전히 돌아왔습니다.
+       <strong>배관은 뚫렸습니다.</strong></p>
+       <p style="margin-top:.6rem">아직 확인되지 않은 것: <strong>Claude Code가 이 주소를 실제로 사용하는가.</strong>
+       그건 Claude Code를 실행하면서 확인해야 합니다.</p>`
+    : `<h2>어딘가 막혀 있습니다</h2>
+       <p>위에서 ❌ 가 붙은 줄을 그대로 Claude에게 보여주세요.
+       어디서 막혔는지 짚어드리겠습니다.</p>`
+}
+</div>
+
+<a class="btn" href="/">← 상태 화면으로</a>
+</main></body></html>`;
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "x-extra-booster": MARKER,
+    },
+  });
+}
+
 function statusPage(url) {
   const html = `<!doctype html>
 <html lang="ko"><head>
@@ -163,11 +322,19 @@ function statusPage(url) {
   ol { padding-left: 1.2rem; }
   li { margin-bottom: .5rem; }
   .muted { opacity: .7; font-size: .9rem; }
+  a.btn { display:inline-block; padding:.8rem 1.2rem; border-radius:8px;
+          border:1px solid rgba(128,128,128,.45); text-decoration:none; color:inherit;
+          font-size:1rem; font-weight:600; }
 </style></head><body><main>
 <h1><span class="ok">✅</span> Extra-Booster 작동 중</h1>
 <p class="muted">Phase 1 · 통과 전용 프록시 · 아직 NVIDIA는 연결되어 있지 않습니다.</p>
 <p>이 화면이 보인다면 <strong>배포는 성공</strong>입니다. 다만 아직 진짜 확인은 끝나지 않았습니다.</p>
-<h2 style="font-size:1.05rem">다음 할 일</h2>
+
+<p style="margin:1.5rem 0"><a class="btn" href="/__eb/selftest">🔍 자가진단 실행하기</a></p>
+<p class="muted">버튼을 누르면 이 프록시가 Anthropic 서버까지 제대로 연결되는지
+휴대폰만으로 확인할 수 있습니다. 로그인 정보는 필요하지 않습니다.</p>
+
+<h2 style="font-size:1.05rem">그다음</h2>
 <ol>
 <li>이 주소를 복사하세요:<br><code>${escapeHtml(url.origin)}</code></li>
 <li>Claude Code 환경변수 <code>ANTHROPIC_BASE_URL</code> 에 넣으세요.</li>
