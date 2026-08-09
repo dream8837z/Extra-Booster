@@ -1,0 +1,12 @@
+{
+  // Cloudflare Workers 배포 설정. 이름을 바꾸면 주소도 바뀝니다.
+  "name": "extra-booster",
+  "main": "src/index.js",
+  "compatibility_date": "2026-01-01",
+
+  // 대시보드에서 실시간 로그를 볼 수 있게 합니다.
+  // Phase 1의 확인 작업이 이 로그에 전적으로 의존하므로 반드시 켜 둡니다.
+  "observability": {
+    "enabled": true
+  }
+}

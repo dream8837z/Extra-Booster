@@ -1,0 +1,15 @@
+{
+  "name": "extra-booster",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code 응답이 토큰 한도로 끊길 때 다른 모델이 이어받게 하는 프록시 (Phase 1: 통과 전용)",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail --format pretty"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
